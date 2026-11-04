@@ -39,7 +39,8 @@ def load_runs():
     runs = {}
     for path in sorted(Path("results").glob("*.json")):
         run = json.loads(path.read_text())
-        runs.setdefault(key(run["config"]), []).extend([] if run["diverged"] else [run])
+        if not run["diverged"]:
+            runs.setdefault(key(run["config"]), []).append(run)
     return runs
 
 
@@ -91,7 +92,7 @@ def plot_panels(runs, panels, metric, ylabel, path, scale=1, log=True, rows=1):
 def curves(runs, device):
     loss = ("train_loss", "Training cross-entropy")
     plot_panels(runs, [(f"{d} layers", mlp(d, False), mlp(d)) for d in (10, 20, 50, 100)], *loss, "figures/depth.png")
-    plot_panels(runs, [(f"Gate bias {b:+g}", mlp(50, False), mlp(50, gate_bias=b)) for b in BIASES], *loss,
+    plot_panels(runs, [(f"Gate bias {b:g}", mlp(50, False), mlp(50, gate_bias=b)) for b in BIASES], *loss,
                 "figures/bias.png", rows=2)
     plot_panels(runs, [(f"{a}, 50 layers", mlp(50, False, a), mlp(50, True, a)) for a in ACTIVATIONS], *loss,
                 "figures/activation.png")
@@ -189,9 +190,8 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
     Path("figures").mkdir(exist_ok=True)
-    runs = load_runs()
     for part in args.parts or parts:
-        parts[part](runs, args.device)
+        parts[part](load_runs(), args.device)
 
 
 if __name__ == "__main__":

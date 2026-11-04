@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import ExponentialLR, MultiStepLR
 from data import batches, load_cifar10
 from models import build_model
 
-BATCH_SIZE, MOMENTUM, CHECKPOINT_EVERY = 128, 0.9, 10
+BATCH_SIZE, MOMENTUM, MAX_GRAD_NORM, CHECKPOINT_EVERY = 128, 0.9, 10.0, 10
 
 
 def run_name(config):
@@ -68,6 +68,7 @@ def train_run(config, device="cpu"):
         for images, labels in batches(*data["train"], BATCH_SIZE, config["augment"]):
             optimizer.zero_grad()
             F.cross_entropy(model(images), labels).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)  # one exploding batch must not end a run
             optimizer.step()
         scheduler.step()
         for split, (images, labels) in data.items():  # 10,000 training images are enough to follow the loss
