@@ -33,7 +33,7 @@ EXPERIMENTS = {
     "depth": [mlp(d, h) for d in (10, 20, 50, 100) for h in (False, True)],
     "cnn": [cnn(d, h) for d in (11, 19, 32) for h in (False, True)],
     "bias": [mlp(50, gate_bias=b) for b in BIASES],
-    "activation": [mlp(50, h, a) for a in ("relu", "tanh") for h in (False, True)],
+    "activation": [mlp(d, h, "tanh") for d in (50, 100) for h in (False, True)] + [mlp(50, True, "tanh", -2.0)],
 }
 
 

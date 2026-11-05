@@ -95,8 +95,8 @@ def curves(runs, device):
     plot_panels(runs, [(f"{d} layers", mlp(d, False), mlp(d)) for d in (10, 20, 50, 100)], *loss, "figures/depth.png")
     plot_panels(runs, [(f"Gate bias {b:g}", mlp(50, False), mlp(50, gate_bias=b)) for b in BIASES], *loss,
                 "figures/bias.png", rows=2)
-    plot_panels(runs, [(f"{a}, 50 layers", mlp(50, False, a), mlp(50, True, a)) for a in ACTIVATIONS], *loss,
-                "figures/activation.png")
+    plot_panels(runs, [(f"{a}, {d} layers", mlp(d, False, a), mlp(d, True, a)) for d in (50, 100) for a in ACTIVATIONS],
+                *loss, "figures/activation.png", rows=2)
     plot_panels(runs, [(f"{d} layers", cnn(d, False), cnn(d, True)) for d in (11, 19, 32)], "test_acc",
                 "Test accuracy (%)", "figures/cnn.png", scale=100, log=False)
 
