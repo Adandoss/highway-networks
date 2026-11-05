@@ -84,6 +84,7 @@ def plot_panels(runs, panels, metric, ylabel, path, scale=1, log=True, rows=1):
                 ax.plot(epochs, np.median(values, axis=0), color=color, label=label)
                 ax.fill_between(epochs, values.min(axis=0), values.max(axis=0), color=color, alpha=0.2, linewidth=0)
         ax.set(title=title, xlabel="Epoch", ylabel=ylabel, yscale="log" if log else "linear")
+        ax.minorticks_off()
         ax.label_outer()
     axes.flat[0].legend()
     fig.savefig(path)
@@ -143,12 +144,14 @@ def gates(runs, device):
     class_fig.savefig("figures/class_gates.png")
 
 
-def gradients(runs, device):
-    """Gradient size at every layer before any training, per image, averaged over five initializations."""
+def signals(runs, device):
+    """Each layer of a 50-layer network before any training, the median over five initializations: gradient and signal
+    size per image, and how alike different images look (for unit vectors, cosine similarity = 1 - distance² / 2)."""
     images, labels = (tensor[:256] for tensor in load_cifar10(device)["train"])
-    fig, ax = plt.subplots(figsize=(5, 2.8))
-    for config, color, label in ((mlp(50, False), PLAIN, "Plain"), (mlp(50), HIGHWAY, "Highway")):
-        sizes = []
+    fig, axes = plt.subplots(1, 3, figsize=(11.5, 3))
+    lines = [(mlp(50, gate_bias=b), SEQUENTIAL(0.15 + 0.17 * i), f"Gate bias {b:g}") for i, b in enumerate(BIASES)]
+    for config, color, label in [(mlp(50, False), PLAIN, "Plain"), *lines]:
+        measures = []
         for seed in range(5):
             torch.manual_seed(seed)
             x, outputs = images, []
@@ -158,11 +161,17 @@ def gradients(runs, device):
                     x.retain_grad()
                     outputs.append(x)
             F.cross_entropy(x, labels).backward()
-            sizes.append([output.grad.pow(2).mean().sqrt().item() * len(images) for output in outputs])
-        ax.plot(range(1, 51), np.mean(sizes, axis=0), color=color, label=label)
-    ax.set(xlabel="Layer", ylabel="Gradient size (RMS)", yscale="log")
-    ax.legend()
-    fig.savefig("figures/gradients.png")
+            measures.append([(o.grad.pow(2).mean().sqrt().item() * len(images), o.pow(2).mean().sqrt().item(),
+                              1 - F.pdist(F.normalize(o.detach())).pow(2).mean().item() / 2) for o in outputs])
+        median = np.median(measures, axis=0)
+        print(f"{label}: gradient {median[0, 0]:.2g} at layer 1, {median[-1, 0]:.2g} at layer 50; "
+              f"at layer 50 signal {median[-1, 1]:.2g}, similarity {median[-1, 2]:.3f}")
+        for ax, values in zip(axes, median.T):
+            ax.plot(range(1, 51), values, color=color, label=label)
+    for ax, ylabel in zip(axes, ("Gradient size (RMS)", "Signal size (RMS)", "Similarity between images")):
+        ax.set(xlabel="Layer", ylabel=ylabel, yscale="linear" if ax is axes[2] else "log")
+    fig.legend(*axes[0].get_legend_handles_labels(), loc="outside right center")
+    fig.savefig("figures/signals.png")
 
 
 def lesion(runs, device):
@@ -183,8 +192,8 @@ def lesion(runs, device):
     fig.savefig("figures/lesion.png")
 
 
-def main():
-    parts = dict(table=table, curves=curves, gates=gates, gradients=gradients, lesion=lesion)
+if __name__ == "__main__":
+    parts = dict(table=table, curves=curves, gates=gates, signals=signals, lesion=lesion)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("parts", nargs="*", help=f"any of: {', '.join(parts)} (default: all)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -192,7 +201,3 @@ def main():
     Path("figures").mkdir(exist_ok=True)
     for part in args.parts or parts:
         parts[part](load_runs(), args.device)
-
-
-if __name__ == "__main__":
-    main()

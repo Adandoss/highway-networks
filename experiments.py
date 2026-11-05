@@ -13,7 +13,7 @@ from models import CNN_LAYOUTS
 from train import run_name, train_run
 
 EPOCHS, SEEDS, CNN_SEARCH_EPOCHS, VAL_SIZE = 150, 5, 30, 5000
-GRID = {"mlp": (3e-4, 1e-3, 3e-3, 0.01, 0.03, 0.1, 0.3), "cnn": (1e-3, 3e-3, 0.01, 0.03, 0.1)}
+GRID = {"mlp": (3e-4, 1e-3, 3e-3, 0.01, 0.03, 0.1, 0.3, 1.0), "cnn": (1e-3, 3e-3, 0.01, 0.03, 0.1, 0.3)}
 BIASES = (2.0, 0.0, -1.0, -2.0, -4.0, -10.0)
 MLP_GATE_BIAS = -4.0  # the paper's 50-layer CIFAR-100 network (Section 4), confirmed in our pilot
 CNN_WEIGHT_DECAY = 5e-4  # not given in the papers, chosen in our pilot
@@ -64,7 +64,7 @@ def find_lrs(configs, args):
             for config in configs]
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("experiments", nargs="+", choices=EXPERIMENTS)
     parser.add_argument("--jobs", type=int, default=1, help="runs at the same time")
@@ -72,12 +72,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--seeds", type=int, default=SEEDS)
     args = parser.parse_args()
-
     # Experiments share identical configurations, and each one is trained only once.
     configs = list({str(config): config for name in args.experiments for config in EXPERIMENTS[name]}.values())
     run_all([dict(config, lr=lr, seed=seed, epochs=args.epochs, val_size=0)
              for config, lr in zip(configs, find_lrs(configs, args)) for seed in range(args.seeds)], args)
-
-
-if __name__ == "__main__":
-    main()
