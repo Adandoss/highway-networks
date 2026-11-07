@@ -1,29 +1,80 @@
 # Highway Networks on CIFAR-10
 
-A PyTorch implementation of highway networks ([Srivastava, Greff & Schmidhuber, 2015](https://arxiv.org/abs/1505.00387)), trained on CIFAR-10 and compared with plain networks of the same size. Beyond the assignment, it tests how the gate bias and the activation function matter, and looks inside trained networks to see what the gates do.
+A PyTorch implementation of highway networks ([Srivastava, Greff & Schmidhuber, 2015](https://arxiv.org/abs/1505.00387)), trained on CIFAR-10 and compared with plain networks of the same size. It also tests how much the gate bias and the activation function matter, and looks inside trained networks to see what the gates do.
 
 Everything was trained on one PC (RTX 4060, Ryzen 7 9700X): about 29 GPU hours for the convolutional networks and 60 CPU-thread hours for the fully connected ones. The weights are saved, so every table and figure can be recomputed on a laptop without training ([Running it](#running-it)).
 
 ## Results in brief
 
 - **Highway MLPs keep training as they get deeper; plain ones don't.** After 150 epochs, the plain MLP's training loss grows from 0.011 at 10 layers to 0.50 at 50 and 0.86 at 100 layers, while the highway MLP stays at 0.013–0.028 up to 50 layers. At 100 layers the ReLU highway network slows down too (0.34), but a tanh one trains as well as at 50 layers (0.0016 against 0.0017), as in the paper. This is about optimization only: without data augmentation, all of these MLPs overfit and land at 38–45% test accuracy.
-- **Convolutional highway networks reach the paper's accuracy.** 19 layers: 92.13% (best of five seeds; mean 91.98 ± 0.12) against the paper's 92.24%. 32 layers: 90.62% (90.21 ± 0.27) against 90.34%. They beat plain CNNs of the same size by 0.5 points at 19 layers and 1.0 at 32, and lose by 0.7 at 11.
-- **The plain CNNs train fine too.** With ReLU and He initialization they reach, directly, the accuracy that FitNets needed a teacher network for (89.04% vs. 89.01% at 11 layers, 91.51% vs. 91.61% at 19). What the gates add at these depths is a higher usable learning rate: the deep highway CNNs train at 0.1, a rate that leaves their plain partners stuck at chance.
+- **Convolutional highway networks reach the paper's accuracy.** 19 layers: 92.13% (best of five seeds; mean 91.98 ± 0.12) against the paper's 92.24%. 32 layers: 90.62% (90.21 ± 0.27) against 90.34%. On average they beat plain CNNs of the same size by 0.5 points at 19 layers and 1.0 at 32, and lose by 0.7 at 11.
+- **The plain CNNs train fine too.** With ReLU and He initialization they train directly to the accuracy that FitNets reached only with a teacher network (on average 89.04% vs. 89.01% at 11 layers, and 91.51% vs. 91.61% at 19). What the gates add at these depths is a higher usable learning rate: the deep highway CNNs train at 0.1, a rate that leaves their plain partners stuck at chance.
 - **With ReLU, the gate bias must start strongly negative.** At 50 layers, a bias of −4 trains in every seed (loss 0.013), −10 in three of five, and every bias from −2 to +2 ends worse than the plain network. A half-open gate averages its input with a partly unrelated signal, which shrinks the signal by 15% per layer: to 3 × 10⁻⁴ of its size after 49 layers. With tanh, −2 also works (0.031).
 - **Plain ReLU networks aren't slowed by vanishing gradients here.** He initialization keeps their gradients the same size in every layer. What goes wrong is that by layer 50 every image looks almost the same to the network (cosine similarity 0.99).
 - **Trained gates are selective, and every layer is used.** For one image only 1–5% of the gates are open, but different images open different gates. The tanh network reproduces the paper's pattern of gate biases rising with depth. Bypassing any single layer raises the training loss.
 
-## The idea
+## How a highway network works
 
-A plain layer computes `y = H(x)`, usually an affine map followed by a nonlinearity. A highway layer adds a *transform gate* `T(x) = σ(W_T x + b_T)` with values between 0 and 1, and mixes:
+This section follows the paper and its longer follow-up by the same authors, [Training Very Deep Networks](https://arxiv.org/abs/1507.06228). Where both papers cover a point, they use the same equation and section numbers.
+
+A **plain layer** computes `y = H(x, W_H)` (Eq. 1), where H is usually an affine map followed by a nonlinearity. According to the paper, SGD stalls at the start of training a deep plain network unless the weights are initialized so that signals keep their size on the way forward and back, and the right initialization depends on the exact form of H (Section 2.2).
+
+A **highway layer** lets every unit decide, for every input, how much of its output is the transformed input and how much is the input itself. In general it has two gates, the *transform gate* T and the *carry gate* C (Eq. 2):
 
 ```
-y = H(x) · T(x) + x · (1 − T(x))          the paper's Eq. 3
+y = H(x, W_H) · T(x, W_T) + x · C(x, W_C)
 ```
 
-Each unit (a *block* in the paper) decides, for every input, how much to transform (T near 1) and how much to copy (T near 0). At T = 0 the layer is the identity and its Jacobian is the identity matrix (Eq. 5), so a signal and its gradient can cross many layers unchanged: an *information highway*. Starting the gate bias `b_T` negative makes every layer begin mostly copying, so a deep network starts out behaving like a shallow one.
+Both papers use the simplest choice, C = 1 − T, which gives the standard highway layer (Eq. 3, where `·` multiplies element by element):
 
-In [models.py](models.py) this is one small module. Eq. 3 is element-wise, so `make_layer` can build a linear layer for MLPs or a zero-padded convolution for CNNs; the input and output must have the same shape, so a layer that changes the width (or the channel count) is an ordinary plain layer.
+```
+y = H(x, W_H) · T(x, W_T) + x · (1 − T(x, W_T))
+```
+
+Drawn as a diagram, with g for the activation function:
+
+```
+     ┌──────────────────────────────► × ──────────┐
+     │                                ▲ 1 − T     ▼
+x ───┼──► T = σ(W_T x + b_T) ─────────┤          (+) ───► y
+     │                                ▼ T         ▲
+     └──► H = g(W_H x + b_H) ───────► × ──────────┘
+```
+
+H is an ordinary layer, here an affine map followed by ReLU or tanh. The gate is a second layer of the same size, with its own weights and a sigmoid, so every gate value lies between 0 and 1 (Section 2.2):
+
+```
+T(x) = σ(W_T x + b_T)
+```
+
+**Blocks.** The papers call the units of a highway layer *blocks* (Section 2). Block i computes a *block state* H_i(x) and a gate value T_i(x), and outputs `y_i = H_i(x) · T_i(x) + x_i · (1 − T_i(x))`: a mix of its own transformed value and the matching input value x_i, weighted anew for every input. With two weight matrices, W_H and W_T, a highway layer has twice the parameters of a plain layer of the same width.
+
+**Between copying and transforming.** A shut gate (T = 0) makes the layer copy its input, so its Jacobian is the identity matrix; a fully open gate (T = 1) makes it a plain layer (Eqs. 4 and 5):
+
+```
+y = x,       dy/dx = I         if T(x) = 0
+y = H(x),    dy/dx = H′(x)     if T(x) = 1
+```
+
+A sigmoid never reaches 0 or 1 exactly, so every block works in between, and training can move it smoothly from one behavior to the other. Where gates are nearly shut, a signal can cross many layers almost unchanged: the papers call such paths *information highways*. The gating is inspired by LSTM recurrent networks ([Hochreiter & Schmidhuber, 1997](https://doi.org/10.1162/neco.1997.9.8.1735)), whose gates let information pass across many time steps as highway gates let it pass across many layers.
+
+**The backward pass.** For a gradient `dy` arriving at the output, the follow-up gives the gradients of the highway operation itself (Appendix A, Eq. 9):
+
+```
+dH = T · dy        dT = (H − x) · dy        dx = (1 − T) · dy
+```
+
+From H and T, backpropagation continues into their weights and on to x, since both depend on x too. These three products explain several results below. A shut gate passes the gradient straight through to x, however deep the network, but it also hides the gradient from H, which then learns slowly. And a gate only learns where its two candidates differ: where H(x) = x, its gradient is zero.
+
+**Starting with the gates nearly shut.** The gate bias b_T starts negative: the paper suggests values such as −1 or −3, and the follow-up −1, −2 and −3 for convolutional networks of depth about 10, 20 and 30 (Section 2.2). Every gate then starts mostly shut, so a deep network starts out copying, like a much shallower one, and training opens the gates where transforming helps. The papers found this enough for very deep networks to train, for different activation functions and zero-mean initial weights of H. Unlike a plain network's initialization, it doesn't depend on the form of H, and the follow-up reports that SGD didn't stall even with more than 1,000 layers. The idea comes from LSTMs, whose gates also get initial biases, to help bridge long time lags early in learning (Gers et al., 1999).
+
+**Changing the width.** Eq. 3 needs x, y, H(x) and T(x) to have the same shape. To change the size of the representation, x could be sub-sampled or zero-padded, but both papers use a plain layer instead and stack highway layers after it (Section 2.1). So does this project: the first layer of every MLP, and every convolution that changes the channel count, is a plain layer.
+
+**Convolutional highway layers** compute both H and T with convolutions, with weight sharing and local receptive fields (Section 2.1). The follow-up gives H and T receptive fields of the same size, and both papers zero-pad them, so that the block states and the gates keep the input's size. The gate then works per channel and per position: every value of every feature map has its own gate.
+
+**Residual networks** ([He et al., 2016](https://arxiv.org/abs/1512.03385)), which came later, drop the gates: `y = H(x) + x`. In terms of Eq. 2 both gates stay fully open, which the coupled form C = 1 − T cannot express.
+
+In [models.py](models.py) the highway layer is one small module. Eq. 3 only multiplies and adds element by element, so `make_layer` can build a linear layer for MLPs or a zero-padded convolution for CNNs:
 
 ```python
 class Highway(nn.Module):
@@ -37,8 +88,6 @@ class Highway(nn.Module):
         t = self.gate(x)
         return self.transform(x) * t + x * (1 - t)
 ```
-
-The backward pass explains several results below. The follow-up paper ([Srivastava et al., 2015b](https://arxiv.org/abs/1507.06228), Appendix A) writes it as `dH = T · dy`, `dT = (H − x) · dy`, `dx = (1 − T) · dy`: a closed gate passes the gradient straight through to x, but also hides it from H.
 
 ## What is in this repository
 
@@ -77,11 +126,10 @@ The paper's Figure 1, on CIFAR-10: MLPs with 10, 20, 50 and 100 layers (one plai
 | 100 | 0.86 | 0.34 | 39.90 (38.48 ± 0.94) | 40.24 (39.80 ± 0.39) |
 
 - Plain MLPs train more slowly the deeper they are: the final loss grows nearly 80-fold from 10 to 100 layers, although the deeper networks have more parameters.
-- Highway MLPs train equally well at 10, 20 and 50 layers. At 10 layers the plain network ends lower, as in the paper's Figure 1. Here it also has 32% more parameters, because its first layer is wider.
+- Depth doesn't slow the highway MLPs down up to 50 layers: their loss even falls, from 0.028 at 10 layers to 0.013 at 50. At 10 layers the plain network ends lower, as in the paper's Figure 1. Here it also has 32% more parameters, because its first layer is wider.
 - At 100 layers the ReLU highway network slows down as well (0.34). It still ends 2.5 times lower than its plain partner, and the seeds don't overlap (0.33–0.38 against 0.76–0.99).
-- With tanh instead of ReLU (section 4), the 100-layer highway network trains as well as the 50-layer one: 0.0016 against 0.0017.
 
-**Compared with the paper:** the same picture up to 50 layers. The paper's 100-layer highway network trained as well as its 10-layer one. The ReLU network here doesn't in 150 epochs, but the tanh one trains as well as the 50-layer tanh network (section 4). The paper ran this experiment on MNIST for 400 epochs, with a 40-run random search over learning rate, momentum, learning-rate decay, activation and gate bias. Here only the learning rate is searched; section 4 tests the activation.
+**Compared with the paper:** the same picture up to 50 layers. The paper's 100-layer highway network even ended about ten times lower than its 10-layer one, on par with the 10-layer plain network (Section 3.1). Here the ReLU network falls behind at 100 layers in 150 epochs, while the tanh one trains as well as the 50-layer tanh network (0.0016 against 0.0017; section 4). The paper ran this experiment on MNIST, with a 40-run random search over learning rate, momentum, learning-rate decay, activation and gate bias. Here only the learning rate is searched; section 4 tests the activation.
 
 **Test accuracy** is not in the paper, which reports only training loss here, to study optimization separately from generalization. On CIFAR-10 without augmentation, the faster optimization doesn't turn into test accuracy: every network in this section lands between 38% and 45%, and the most accurate is the plain 10-layer one. At 50 and 100 layers, highway is ahead by 1.5 and 1.3 points.
 
@@ -112,7 +160,7 @@ The learning-rate search behind these runs, validation accuracy (%) after 30 epo
 
 - **The highway CNNs match the paper:** 0.11 points below it at 19 layers and 0.28 above at 32 (best of five against the paper's single number). At 11 layers they are 0.66 below, but this network is smaller than the paper's: built from FitNet 1's published layout it has 172K parameters, against about 236K, and I couldn't find where the paper's extra parameters come from.
 - **The plain CNNs need no special training.** FitNets could only train these depths with hints from a teacher network, and the paper presents direct training as the highway networks' advantage. With ReLU instead of maxout and with He initialization, the plain 11- and 19-layer networks here train directly to FitNets' accuracy.
-- **Gates allow a higher learning rate.** At 19 and 32 layers the highway CNNs train at 0.1, where their plain partners stay at chance (9.5%). Even at the same rate (0.03), the highway network leads after 30 epochs: 88.2% against 86.3% at 19 layers, and 84.7% against 66.5% at 32.
+- **Gates allow a higher learning rate.** At 19 and 32 layers the highway CNNs train at 0.1, where their plain partners stay at chance (9.5%). Even at the same rate (0.03), the highway network leads after 30 epochs: 88.2% against 86.3% at 19 layers, and 84.7% against 66.5% at 32. The figure shows what the high rate costs: the highway CNNs trail their plain partners by 4–5 points until the first learning-rate drop at epoch 75, stay level or slightly behind until the second at epoch 112, and pull ahead only after it.
 - **At 11 layers the gates cost accuracy**, probably because depth is no obstacle yet: half of each highway layer's parameters go into its gates, while the plain partner spends them on wider layers.
 - **The differences are larger than the seed noise:** at 11 and 32 layers the five seeds of the two networks don't overlap, and at 19 layers they overlap only slightly (91.80–92.13 against 91.32–91.85).
 
@@ -135,7 +183,7 @@ Why? Look at the networks before any training:
 
 ![Gradient size, signal size and similarity between images, per layer, before training](figures/signals.png)
 
-*Per layer of a 50-layer network before training: gradient size, signal size, and the cosine similarity between the representations of two different images. Median over five initializations, 256 images.*
+*Per layer of a 50-layer network before training: gradient size, signal size, and the mean cosine similarity between the representations of different images. Median over five initializations, 256 images.*
 
 | Before training | Plain | +2 | 0 | −1 | −2 | −4 | −10 |
 |---|---|---|---|---|---|---|---|
@@ -174,7 +222,7 @@ The 50- and 100-layer MLPs again, with tanh instead of ReLU: highway (gate bias 
 
 - At 50 layers the tanh highway network ends 8 times lower than the ReLU one, at a 30 times higher learning rate (0.3 against 0.01). A tanh unit's output stays between −1 and 1, and a highway layer's output is a weighted average of two such values, so the activations can't blow up the way they did in the ReLU networks of section 3.
 - **At 100 layers, tanh gives the paper's result.** The tanh highway network's curve follows the 50-layer one closely and ends at the same loss (0.0016 against 0.0017; seeds 0.0015–0.0018), while the ReLU network slows down to 0.34. The ReLU network is held back mostly by its learning rate. In the search it blew up at every rate from 0.01 upward (peak losses of 3 × 10⁴ or more, NaN at 1.0), so it trained at 0.003, a hundred times lower than the tanh network. At that rate the 50-layer ReLU network doesn't get far either: 0.19 after 150 epochs in the search, against 0.32 at 100 layers.
-- **With tanh, a gate bias of −2 is enough.** The tanh network with −2 ends at 0.031 (seeds 0.025–0.036), against 1.98 for ReLU with the same bias, though it trains more slowly than with −4. Before training its signal shrinks even more than the ReLU network's (RMS 0.003 at layer 50, against 0.055), but different images stay different: their similarity is 0.03 at layer 1 and 0.04 at layer 50, while with ReLU, whose outputs are never negative, it rises from 0.35 to 0.999 (one-off check). Its loss also never rises above where it started, while every ReLU seed with −2 spiked above 1,000 in its first 13 epochs.
+- **With tanh, a gate bias of −2 is enough.** The tanh network with −2 ends at 0.031 (seeds 0.025–0.035), against 1.98 for ReLU with the same bias, though it trains more slowly than with −4. Before training its signal shrinks even more than the ReLU network's (RMS 0.003 at layer 50, against 0.055), but different images stay different: their similarity is 0.03 at layer 1 and 0.04 at layer 50, while with ReLU, whose outputs are never negative, it rises from 0.35 to 0.999 (one-off check). Its loss also never rises above where it started, while every ReLU seed with −2 spiked above 1,000 in its first 13 epochs.
 - Depth makes the plain tanh networks worse too (0.42 at 50 layers, 1.14 at 100), but they fail the opposite way from the plain ReLU ones. He initialization is designed for ReLU and is too large for tanh, so before training the gradient grows on its way back (1.8 at layer 1 against 0.17 at layer 50), and different images drift further apart rather than together (similarity 0.03 at layer 1, 0.002 at layer 50; one-off check).
 - The tanh highway networks' far lower training loss doesn't buy test accuracy: 38.8–39.9% on average over seeds, against 41.6% for the 50-layer ReLU one. The plain tanh networks reach 34.9–35.1%.
 
@@ -186,11 +234,11 @@ The paper's Figure 2, for the best 50-layer ReLU and tanh highway MLPs (the seed
 
 ![Gate biases, mean gate outputs, gates and block outputs for one image](figures/gates.png)
 
-*Rows: ReLU and tanh networks. Columns: each unit's gate bias after training (started at −4); its gate output averaged over 10,000 images; its gate output for one image; its block output (the layer's output) for the same image. Each row of a panel is one highway layer, from the first (top) to the 49th (bottom).*
+*Rows: ReLU and tanh networks. Columns: each unit's gate bias after training (started at −4); its gate output averaged over 10,000 images; its gate output for one image; its block output (the layer's output) for the same image. Each row of a panel is one highway layer, from the first (top) to the 49th (bottom). ReLU block outputs are never negative, so they get a one-sided color scale; the tanh ones are blue below zero and red above.*
 
 - **The gates are selective.** Averaged over images they are about 7% (ReLU) and 5% (tanh) open. For one image only 4.7% (ReLU) or 1.2% (tanh) of them are above 0.5, yet 59% (ReLU) and 37% (tanh) of them open for at least 1 image in 100: each image uses its own few gates (one-off check). The paper describes the same: gates that are rarely open, and open differently for every input.
-- **The tanh network reproduces the paper's bias gradient.** Its biases spread from −5.5 to −2.4 and rise with depth (on average −4.56 in layers 1–10, −3.81 in layers 20–30 and −3.86 in layers 40–49), while the mean gate activity falls with depth (0.070 in layers 1–10, 0.025 in layers 40–49). Across layers the two are correlated at −0.85 (one-off check). The paper found this for CIFAR-100 and concluded that the strongly negative biases of the early layers make their gates more selective rather than shutting them. The ReLU biases barely move (−4.23 to −3.92).
-- **Information highways.** The block outputs form vertical stripes: most units keep their value across many layers, as in the paper. In the tanh network, 75% of all change happens in the first 25 layers (the paper: about 30 for CIFAR-100). The ReLU network spreads it more evenly, reaching 75% only at layer 36 (one-off check).
+- **The tanh network reproduces the paper's bias gradient.** Its biases spread from −5.5 to −2.4 and rise with depth (on average −4.56 in highway layers 1–10, −3.81 in 20–30 and −3.86 in 40–49), while the mean gate activity falls with depth (0.070 in highway layers 1–10, 0.025 in 40–49). Across layers the two are correlated at −0.85 (one-off check). The paper found this for CIFAR-100 and concluded that the strongly negative biases of the early layers make their gates more selective rather than shutting them. The ReLU biases barely move (−4.23 to −3.92).
+- **Information highways.** The block outputs form vertical stripes: most units keep their value across many layers, as in the paper. In the tanh network, 75% of all change happens in the first 25 highway layers (the paper: about 30 for CIFAR-100). The ReLU network spreads it more evenly, reaching 75% only at highway layer 36 (one-off check).
 - The paper also noticed that most biases ended lower than they started. Here 88% of the ReLU biases end below −4, but by 0.23 at most; in the tanh network half moved down and half up.
 
 ![Mean gate activity for four classes minus the overall mean](figures/class_gates.png)
@@ -203,13 +251,13 @@ The paper's Figure 2, for the best 50-layer ReLU and tanh highway MLPs (the seed
 
 *The follow-up's Figure 4: training loss on 10,000 images when the gates of one highway layer are forced to 0, so that the layer only copies its input. The gray line is the loss with every layer working.*
 
-- **50-layer MLP: every layer is used.** Bypassing any single layer raises the loss, early layers the most (3.2 for layer 1, 0.02 for layer 49, against 0.010 with every layer working). The follow-up found this for CIFAR-100, and the opposite for MNIST, where 60% of the layers could be bypassed with almost no effect.
+- **50-layer MLP: every layer is used.** Bypassing any single layer raises the loss, early layers the most (3.2 for highway layer 1, 0.02 for highway layer 49, against 0.010 with every layer working). The follow-up found much the same for CIFAR-100, where bypassing any of the first ≈40 of its 50 layers hurts noticeably, and the opposite for MNIST, where about 60% of the layers could be bypassed with almost no effect.
 - **19-layer CNN: one layer is essential.** Bypassing highway layer 3, the only highway layer working at 48 channels, raises the loss from about 0.004 to between 2.3 and 3.8 in every seed. The CNN's gates are also far more open than the MLP's: 0.15–0.62 on average per layer, against 0.07 (one-off check on all five seeds). The convolutional network uses its highway layers mostly to transform, not to copy.
 - **32-layer CNN** (one-off check, not in the figure): in its last stage, bypassing four of the five 1×1 layers raises the loss to at most 0.1 (from about 0.02), while bypassing any of the four 3×3 layers raises it to 0.29–1.08.
 
 ## Differences from the papers
 
-- **Dataset and length.** The depth study (section 1) uses CIFAR-10 rather than MNIST, as the assignment asks, and 150 epochs rather than 400. The gate figures (section 5) are for CIFAR-10 rather than MNIST and CIFAR-100.
+- **Dataset and length.** The depth study (section 1) uses CIFAR-10 rather than MNIST. It trains for 150 epochs; the papers don't say how long theirs trained. The gate figures (section 5) are for CIFAR-10 rather than MNIST and CIFAR-100.
 - **Hyperparameter search.** A grid over the learning rate only, rather than a 40-run random search over learning rate, momentum, decay, activation and gate bias. Momentum (0.9) and the decay (× 0.98 per epoch) are fixed; activation and gate bias are separate experiments. The grid was extended once at its top (MLP: 1.0, CNN: 0.3) when three networks picked its largest rate, and no choice changed.
 - **CNN training details.** The authors' code page is no longer online, so the learning rate, schedule and weight decay are my own choices (a 30-epoch search, steps at 50% and 75% of training, and 5 × 10⁻⁴ from a 60-epoch pilot). The images get contrast normalization without the ZCA whitening that FitNets used.
 - **CNN layouts.** The 11-layer network has 172K parameters rather than about 236K. The 32-layer network's widths (32, 64 and 96 channels) are my choice, because the papers only describe its alternating 3×3 and 1×1 layers and its size (about 1.25M parameters; this one has 1.31M). The paper trained its 32-layer network on 40,000 images; here all networks use 50,000.
@@ -221,9 +269,11 @@ The paper's Figure 2, for the best 50-layer ReLU and tanh highway MLPs (the seed
 
 Tested with Python 3.13, PyTorch 2.14.1, torchvision 0.29.1, matplotlib 3.10–3.11 and NumPy 2.2–2.5 on Windows 11. The scripts keep the data, results, checkpoints and figures in this folder, whichever folder they are started from.
 
-**Train** (CIFAR-10 downloads itself into `data/` the first time):
+**Train** (CIFAR-10 downloads itself into `data/` the first time). The MLPs use a CPU-only PyTorch in your main Python installation, the CNNs the CUDA build in a virtual environment:
 
 ```powershell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install matplotlib
 python -m venv .venv
 .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
 .venv\Scripts\pip install matplotlib
@@ -234,7 +284,7 @@ python experiments.py depth bias activation --jobs 8 --device cpu
 .venv\Scripts\python experiments.py cnn --device cuda
 ```
 
-- The MLPs (first command) run as 8 single-threaded jobs on the CPU: 60 CPU-thread hours, so about 8 hours on 8 cores. They use a CPU-only PyTorch install, outside the virtual environment: each worker of the CUDA build reserves about 6 GB of memory, and eight of them crashed the process pool on a 31 GB machine.
+- The MLPs (first command) run as 8 single-threaded jobs on the CPU: 60 CPU-thread hours, so about 8 hours on 8 cores. They use the CPU-only build because each worker of the CUDA build reserves about 6 GB of memory, and eight of them crashed the process pool on a 31 GB machine.
 - The CNNs (second command) run one at a time on the GPU, about 29 hours on an RTX 4060.
 - **Stopping and resuming.** Rerunning a command skips finished runs and resumes unfinished ones from their last checkpoint (saved every 10 epochs). Ctrl-C does not stop a job cleanly: each worker abandons its current run and starts the next one. End the Python processes instead (Task Manager, or `Stop-Process` in PowerShell).
 
@@ -248,7 +298,7 @@ This writes [results/summary.md](results/summary.md) and every figure in `figure
 
 **On a laptop, without training:** copy this folder including `checkpoints/` (305 MB) and `results/`, then run `pip install -r requirements.txt` and `python analyze.py`. If `data/` wasn't copied, CIFAR-10 (163 MB) downloads automatically; that took 28 minutes here, so copying `data/` along is faster. The analysis took about 8 minutes on this PC's 8-core CPU with CPU-only PyTorch (a laptop will likely be slower), and 1.5 minutes on its GPU. Because a CPU rounds differently from a GPU, a few numbers in `summary.md` can come out up to 0.05 points different (four rows here).
 
-**Using one trained network.** Each checkpoint holds its configuration next to its weights, so it rebuilds itself:
+**Using one trained network.** Each checkpoint holds its configuration next to its weights, so it rebuilds itself. Run this from this folder:
 
 ```python
 import torch
@@ -270,3 +320,6 @@ A run's name lists its configuration: `cnn-19-highway-b-2-relu-lr0.1-s0` is the 
 - R. K. Srivastava, K. Greff, J. Schmidhuber. *Training Very Deep Networks.* NeurIPS 2015. [arXiv:1507.06228](https://arxiv.org/abs/1507.06228). "The follow-up".
 - A. Romero et al. *FitNets: Hints for Thin Deep Nets.* ICLR 2015. [arXiv:1412.6550](https://arxiv.org/abs/1412.6550).
 - K. He, X. Zhang, S. Ren, J. Sun. *Delving Deep into Rectifiers.* ICCV 2015. [arXiv:1502.01852](https://arxiv.org/abs/1502.01852).
+- K. He, X. Zhang, S. Ren, J. Sun. *Deep Residual Learning for Image Recognition.* CVPR 2016. [arXiv:1512.03385](https://arxiv.org/abs/1512.03385).
+- S. Hochreiter, J. Schmidhuber. *Long Short-Term Memory.* Neural Computation 9(8), 1997. [doi:10.1162/neco.1997.9.8.1735](https://doi.org/10.1162/neco.1997.9.8.1735).
+- F. A. Gers, J. Schmidhuber, F. Cummins. *Learning to Forget: Continual Prediction with LSTM.* ICANN 1999.
