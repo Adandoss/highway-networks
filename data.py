@@ -5,11 +5,15 @@ import torch
 import torch.nn.functional as F
 from torchvision.datasets import CIFAR10
 
+DATA = Path(__file__).parent / "data"
+
 
 def load_split(train):
-    dataset = CIFAR10(Path(__file__).parent / "data", train=train, download=True)
+    """The training or test images, normalized, and their labels."""
+    dataset = CIFAR10(DATA, train=train, download=True)
     images = torch.from_numpy(dataset.data).permute(0, 3, 1, 2).float()
-    # Global contrast normalization, image by image (follow-up, Section 3.3.2).
+    # Global contrast normalization, image by image (follow-up, Section 3.3.2). Pixels run from 0 to 255, so the
+    # floor of 1 on the standard deviation only holds back nearly blank images.
     mean, std = images.mean((1, 2, 3), keepdim=True), images.std((1, 2, 3), keepdim=True)
     return (images - mean) / std.clamp_min(1.0), torch.tensor(dataset.targets)
 
@@ -26,14 +30,17 @@ def load_cifar10(device, val_size=0):
 
 
 def augment(images, pad=4):
-    """Small translations and mirroring (follow-up, Section 3.3.2), different for every image in the batch."""
+    """Random translations by up to `pad` pixels and mirroring (follow-up, Section 3.3.2), different for every image."""
     n, _, height, width = images.shape
+    device = images.device
     padded = F.pad(images, (pad, pad, pad, pad))
-    top, left = torch.randint(0, 2 * pad + 1, (2, n), device=images.device)
-    rows = (top[:, None] + torch.arange(height, device=images.device))[:, :, None]
-    cols = (left[:, None] + torch.arange(width, device=images.device))[:, None, :]
-    cropped = padded[torch.arange(n, device=images.device)[:, None, None], :, rows, cols].permute(0, 3, 1, 2)
-    mirror = torch.rand(n, device=images.device) < 0.5
+    top, left = torch.randint(0, 2 * pad + 1, (2, n, 1, 1), device=device)  # each image's crop corner
+    rows = top + torch.arange(height, device=device)[:, None]  # (n, height, 1)
+    cols = left + torch.arange(width, device=device)  # (n, 1, width)
+    batch = torch.arange(n, device=device)[:, None, None]  # (n, 1, 1)
+    # The three index tensors broadcast to (n, height, width); indexing moves the channel dimension to the end.
+    cropped = padded[batch, :, rows, cols].permute(0, 3, 1, 2)
+    mirror = torch.rand(n, device=device) < 0.5
     cropped[mirror] = cropped[mirror].flip(-1)
     return cropped
 

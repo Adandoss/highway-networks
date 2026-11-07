@@ -44,11 +44,11 @@ The backward pass explains several results below. The follow-up paper ([Srivasta
 
 | File | Lines | Contents |
 |---|---|---|
-| [models.py](models.py) | 80 | The highway layer, MLP and CNN builders with their plain partners |
-| [data.py](data.py) | 44 | CIFAR-10 as tensors on the training device, per-image contrast normalization, augmentation |
-| [train.py](train.py) | 95 | One training run: SGD, learning-rate schedule, checkpoints every 10 epochs, resume |
-| [experiments.py](experiments.py) | 78 | The experiments as data, the learning-rate search, a parallel runner |
-| [analyze.py](analyze.py) | 203 | The results table and every figure, from saved results and weights |
+| [models.py](models.py) | 96 | The highway layer, MLP and CNN builders with their plain partners |
+| [data.py](data.py) | 51 | CIFAR-10 as tensors on the training device, per-image contrast normalization, augmentation |
+| [train.py](train.py) | 119 | One training run: SGD, learning-rate schedule, checkpoints every 10 epochs, resume |
+| [experiments.py](experiments.py) | 93 | The experiments as data, the learning-rate search, a parallel runner |
+| [analyze.py](analyze.py) | 289 | The results table and every figure, from saved results and weights |
 | `results/` | | One JSON file per run (configuration and per-epoch metrics), and [summary.md](results/summary.md) |
 | `figures/` | | The figures in this README |
 | `checkpoints/` | | The weights of every final run, 305 MB (not in git) |
@@ -87,7 +87,7 @@ The paper's Figure 1, on CIFAR-10: MLPs with 10, 20, 50 and 100 layers (one plai
 
 ## 2. How accurate are convolutional highway networks?
 
-The paper's Table 1: highway versions of FitNet 1 (11 layers) and FitNet 4 (19 layers) from [Romero et al. (2014)](https://arxiv.org/abs/1412.6550), and a 32-layer network of alternating 3×3 and 1×1 convolutions (the follow-up's "Highway C"). A layer that changes the channel count is plain and every other layer is a highway layer, with 2×2 max pooling between blocks, global max pooling, a 500-unit layer and softmax. The gate biases are −1, −2 and −3, as the follow-up suggests for depths of about 10, 20 and 30.
+The paper's Table 1: highway versions of FitNet 1 (11 layers) and FitNet 4 (19 layers) from [Romero et al. (2014)](https://arxiv.org/abs/1412.6550), and a 32-layer network of alternating 3×3 and 1×1 convolutions (the follow-up's "Highway C"). A layer that changes the channel count is plain and every other layer is a highway layer, with 2×2 max pooling between the three stages, then global max pooling, a 500-unit layer and softmax. The gate biases are −1, −2 and −3, as the follow-up suggests for depths of about 10, 20 and 30.
 
 | Layers | Parameters (highway / plain) | Highway (%) | Plain (%) | Paper's highway (%) | FitNet, Romero et al. (%) |
 |---|---|---|---|---|---|
@@ -97,7 +97,7 @@ The paper's Table 1: highway versions of FitNet 1 (11 layers) and FitNet 4 (19 l
 
 ![Test accuracy of plain and highway CNNs](figures/cnn.png)
 
-*Test accuracy per epoch, median and range over five seeds. The jumps at epochs 75 and 112 are the learning-rate drops.*
+*Test accuracy per epoch, median and range over five seeds. The jumps at epochs 75 and 112 are the learning-rate drops. The axis starts at 70%, so the first few epochs are cut off.*
 
 The learning-rate search behind these runs, validation accuracy (%) after 30 epochs, seed 0 (the chosen rate in bold):
 
@@ -205,7 +205,7 @@ The paper's Figure 2, for the best 50-layer ReLU and tanh highway MLPs (the seed
 
 - **50-layer MLP: every layer is used.** Bypassing any single layer raises the loss, early layers the most (3.2 for layer 1, 0.02 for layer 49, against 0.010 with every layer working). The follow-up found this for CIFAR-100, and the opposite for MNIST, where 60% of the layers could be bypassed with almost no effect.
 - **19-layer CNN: one layer is essential.** Bypassing highway layer 3, the only highway layer working at 48 channels, raises the loss from about 0.004 to between 2.3 and 3.8 in every seed. The CNN's gates are also far more open than the MLP's: 0.15–0.62 on average per layer, against 0.07 (one-off check on all five seeds). The convolutional network uses its highway layers mostly to transform, not to copy.
-- **32-layer CNN** (one-off check, not in the figure): in its last block, bypassing four of the five 1×1 layers raises the loss to at most 0.1 (from about 0.02), while bypassing any of the four 3×3 layers raises it to 0.29–1.08.
+- **32-layer CNN** (one-off check, not in the figure): in its last stage, bypassing four of the five 1×1 layers raises the loss to at most 0.1 (from about 0.02), while bypassing any of the four 3×3 layers raises it to 0.29–1.08.
 
 ## Differences from the papers
 
@@ -219,7 +219,7 @@ The paper's Figure 2, for the best 50-layer ReLU and tanh highway MLPs (the seed
 
 ## Running it
 
-Tested with Python 3.13, PyTorch 2.14.1, torchvision 0.29.1, matplotlib 3.10–3.11 and NumPy 2.2–2.5 on Windows 11. Run every command from this folder: results and checkpoints are written relative to the working directory.
+Tested with Python 3.13, PyTorch 2.14.1, torchvision 0.29.1, matplotlib 3.10–3.11 and NumPy 2.2–2.5 on Windows 11. The scripts keep the data, results, checkpoints and figures in this folder, whichever folder they are started from.
 
 **Train** (CIFAR-10 downloads itself into `data/` the first time):
 

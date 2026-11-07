@@ -2,20 +2,25 @@
 
 "The paper" is Srivastava, Greff, Schmidhuber: Highway Networks (arXiv 1505.00387).
 "The follow-up" is the same authors' Training Very Deep Networks (arXiv 1507.06228)."""
+from functools import partial
+
 import torch.nn as nn
 
 ACTIVATIONS = {"relu": nn.ReLU, "tanh": nn.Tanh}
 
-# Equal parameters per layer (paper, Section 3.1): 2 * (50^2 + 50) = 5100 and 71^2 + 71 = 5112.
-MLP_WIDTH = {True: 50, False: 71}
+# MLP layer widths for equal parameters per layer (paper, Section 3.1). A highway layer holds two 50 x 50 layers,
+# H and T: 2 * (50^2 + 50) = 5100 parameters. A plain layer holds one 71 x 71 layer: 71^2 + 71 = 5112.
+HIGHWAY_WIDTH = 50
+PLAIN_WIDTH = 71
 
-# Channels of every conv layer, block by block. 11 and 19 layers are FitNet 1 and FitNet 4 (Romero et al. 2014,
-# Table 7). For 32 layers the follow-up (Section 3.3.1) only gives the alternating 3x3 and 1x1 kernels, so the
-# channels are our own choice. gate_bias follows the follow-up (Section 2.2), plain_scale evens out the plain partner.
+# The output channels of every conv layer, stage by stage, with max pooling between the stages. 11 and 19 layers are
+# FitNet 1 and FitNet 4 (Romero et al. 2014, Table 7). For 32 layers the follow-up (Section 3.3.1) only gives the
+# alternating 3x3 and 1x1 kernels (alternate=True: every second layer is 1x1), so the channels are our own choice.
+# A plain network has no gates to pay for, so its layers are plain_scale times wider, for about equal parameters.
 CNN_LAYOUTS = {
-    11: dict(blocks=[[16, 16, 16], [32, 32, 32], [48, 48, 64]], alternate=False, gate_bias=-1.0, plain_scale=1.18),
-    19: dict(blocks=[[32, 32, 32, 48, 48], [80] * 6, [128] * 6], alternate=False, gate_bias=-2.0, plain_scale=1.37),
-    32: dict(blocks=[[32] * 10, [64] * 10, [96] * 10], alternate=True, gate_bias=-3.0, plain_scale=1.36),
+    11: dict(stages=[[16, 16, 16], [32, 32, 32], [48, 48, 64]], alternate=False, plain_scale=1.18),
+    19: dict(stages=[[32, 32, 32, 48, 48], [80] * 6, [128] * 6], alternate=False, plain_scale=1.37),
+    32: dict(stages=[[32] * 10, [64] * 10, [96] * 10], alternate=True, plain_scale=1.36),
 }
 
 
@@ -24,6 +29,10 @@ def he(layer):
     nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
     nn.init.zeros_(layer.bias)
     return layer
+
+
+def linear(n_in, n_out):
+    return he(nn.Linear(n_in, n_out))
 
 
 def conv(c_in, c_out, kernel):
@@ -48,33 +57,40 @@ class Highway(nn.Module):
         return self.transform(x) * t + x * (1 - t)
 
 
-def mlp(depth, highway, activation, gate_bias):
+def build_mlp(depth, highway, activation, gate_bias):
     """One plain layer, then depth - 1 plain or highway layers, then softmax (paper, Section 3.1)."""
-    act, width = ACTIVATIONS[activation], MLP_WIDTH[highway]
-    make_layer = lambda: he(nn.Linear(width, width))  # noqa: E731
-    layers = [nn.Flatten(), he(nn.Linear(3 * 32 * 32, width)), act()]
+    act = ACTIVATIONS[activation]
+    width = HIGHWAY_WIDTH if highway else PLAIN_WIDTH
+    layers = [nn.Flatten(), linear(3 * 32 * 32, width), act()]
     for _ in range(depth - 1):
-        layers += [Highway(make_layer, act, gate_bias)] if highway else [make_layer(), act()]
-    return nn.Sequential(*layers, he(nn.Linear(width, 10)))
+        if highway:
+            layers.append(Highway(partial(linear, width, width), act, gate_bias))
+        else:
+            layers += [linear(width, width), act()]
+    return nn.Sequential(*layers, linear(width, 10))
 
 
-def cnn(depth, highway, activation, gate_bias):
-    """Conv blocks with max pooling between them, global pooling, a 500-unit layer and softmax (FitNets, A.1.2)."""
+def build_cnn(depth, highway, activation, gate_bias):
+    """Stages of conv layers with 2x2 max pooling between them, then global max pooling, a 500-unit layer and softmax
+    (FitNets, Appendix A.1.2)."""
     layout, act = CNN_LAYOUTS[depth], ACTIVATIONS[activation]
+    scale = 1 if highway else layout["plain_scale"]
+    stages = [[round(c * scale) for c in stage] for stage in layout["stages"]]
     layers, channels = [], 3
-    for b, block in enumerate(layout["blocks"]):
-        for i, out in enumerate(block):
+    for s, stage in enumerate(stages):
+        for i, out in enumerate(stage):
             kernel = 1 if layout["alternate"] and i % 2 else 3
             if highway and out == channels:
-                layers.append(Highway(lambda: conv(out, out, kernel), act, gate_bias))
-            else:  # Eq. 3 needs equal shapes, so a plain layer changes the channel count (paper, Section 2.1)
-                out = out if highway else round(out * layout["plain_scale"])
+                layers.append(Highway(partial(conv, out, out, kernel), act, gate_bias))
+            else:  # Eq. 3 needs equal shapes, so a layer that changes the channel count is plain (paper, Section 2.1)
                 layers += [conv(channels, out, kernel), act()]
                 channels = out
-        layers.append(nn.MaxPool2d(2) if b < len(layout["blocks"]) - 1 else nn.AdaptiveMaxPool2d(1))
-    return nn.Sequential(*layers, nn.Flatten(), he(nn.Linear(channels, 500)), act(), he(nn.Linear(500, 10)))
+        last = s == len(stages) - 1
+        layers.append(nn.AdaptiveMaxPool2d(1) if last else nn.MaxPool2d(2))
+    return nn.Sequential(*layers, nn.Flatten(), linear(channels, 500), act(), linear(500, 10))
 
 
 def build_model(config):
-    builder = {"mlp": mlp, "cnn": cnn}[config["kind"]]
-    return builder(config["depth"], config["highway"], config["activation"], config["gate_bias"])
+    """The network a configuration from experiments.py describes."""
+    build = {"mlp": build_mlp, "cnn": build_cnn}[config["kind"]]
+    return build(config["depth"], config["highway"], config["activation"], config["gate_bias"])
